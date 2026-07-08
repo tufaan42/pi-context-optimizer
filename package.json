@@ -1,0 +1,13 @@
+{
+  "name": "pi-antigravity",
+  "version": "0.1.0",
+  "description": "Antigravity-style plan→review→execute→walkthrough loop for the pi coding agent, with VS Code editor hosting via pithings/pi-vscode.",
+  "type": "module",
+  "main": "./index.ts",
+  "keywords": ["pi-package", "pi-extension", "pi", "antigravity", "plan", "review", "approve"],
+  "pi": {
+    "type": "extension",
+    "entry": "./index.ts"
+  },
+  "license": "MIT"
+}
