@@ -1,6 +1,6 @@
 {
   "name": "pi-context-optimizer",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "description": "Plan → Review → Execute → Walkthrough loop for the pi coding agent. A structured, gate-driven workflow engine with human-in-the-loop approval.",
   "type": "module",
   "main": "./dist/index.js",
@@ -54,8 +54,7 @@
   "author": "Tufaan",
   "license": "MIT",
   "pi": {
-    "type": "extension",
-    "entry": "./dist/index.js"
+    "extensions": ["./dist/index.js"]
   },
   "publishConfig": {
     "access": "public"
