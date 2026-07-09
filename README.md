@@ -49,7 +49,8 @@ To use `pi-context-optimizer`, ensure you have the following:
 3. **Sub-agent Infrastructure**:
    - **`kmmuntasir/pi-nested-subagents:src`** (or configured sub-agent tools on the agent system) for executing nested agent sessions.
    - **`tsedr-runtime`** (`T-SEDR`) configured globally or locally to hook into agent sessions.
-4. **Peer Dependencies**:
+4. **VS Code Extension** (Optional): **`tufaan42.pi-context-optimizer`** for human-in-the-loop plan reviews and approval controls directly in the IDE.
+5. **Peer Dependencies**:
    - `@earendil-works/pi-coding-agent >= 0.78.0`
    - `@earendil-works/pi-tui >= 0.78.0`
    - `typebox >= 1.1.0`
