@@ -1,11 +1,11 @@
 /**
- * The 5-state machine for the pi-antigravity plan→review→execute→walkthrough loop.
+ * The 5-state machine for the pi-context-optimizer plan→review→execute→walkthrough loop.
  *
  *   INERT --/plan--> RESEARCHING --model.write_plan--> PLAN_DRAFTING --writes plan.md--> REVIEW_PENDING
  *   REVIEW_PENDING <--/reject-- (PLAN_DRAFTING)  |  <--approval=approved--> EXECUTING --all done + write_walkthrough--> INERT
  *
  * State lives in-memory in the extension; it is persisted into the session
- * JSONL via `pi.appendEntry("antigravity", …)` so `/resume` rebuilds it in
+ * JSONL via `pi.appendEntry("context-optimizer", …)` so `/resume` rebuilds it in
  * `session_start`. The single source of truth at runtime is the `AgState`
  * object here; the `status.json` file is the *human-readable* mirror that the
  * file-watch and the VS Code approve/reject commands both write to.

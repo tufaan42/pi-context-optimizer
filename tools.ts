@@ -1,5 +1,5 @@
 /**
- * Model-callable tools for the pi-antigravity loop.
+ * Model-callable tools for the pi-context-optimizer loop.
  *
  *   write_plan         — RESEARCHING/PLAN_DRAFTING only. Writes plan.md, opens
  *                        it in VS Code, flips state → REVIEW_PENDING, and tells

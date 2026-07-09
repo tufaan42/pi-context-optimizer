@@ -1,5 +1,5 @@
 /**
- * pi-antigravity — Antigravity-style plan→review→execute→walkthrough loop for pi.
+ * pi-context-optimizer — Context-optimizer plan→review→execute→walkthrough loop for pi.
  *
  * Builds directly on pi's bundled `examples/extensions/plan-mode` reference
  * (same gate primitives: registerFlag/registerCommand/registerShortcut,
@@ -49,7 +49,7 @@ import { openArtifactInVSCode, pushPlanStatusToVSCode } from "./open.ts";
 
 import { Dispatcher } from "./dispatcher.ts";
 
-const PERSIST_TYPE = "antigravity";
+const PERSIST_TYPE = "context-optimizer";
 
 // Tools available (removed/restored by setActiveTools per phase).
 const RESEARCH_TOOLS_BASE = new Set([
@@ -80,7 +80,7 @@ function getTextContent(message: AssistantMessage): string {
 		.join("\n");
 }
 
-export default function antigravityExtension(pi: ExtensionAPI): void {
+export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 	let state: AgState = defaultState();
 	let tasks: TaskItem[] = [];
 	let toolsBefore: string[] | undefined; // tool set captured on entering plan mode
@@ -276,7 +276,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 	// Flags / commands / shortcuts
 	// -----------------------------------------------------------------
 	pi.registerFlag("ag-plan", {
-		description: "Start the session in Antigravity plan (read-only research) mode",
+		description: "Start the session in Context Optimizer plan (read-only research) mode",
 		type: "boolean",
 		default: false,
 	});
@@ -288,11 +288,11 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("plan", {
-		description: "Enter Antigravity plan mode (read-only research → written plan → human review)",
+		description: "Enter Context Optimizer plan mode (read-only research → written plan → human review)",
 		handler: async (_args, ctx) => {
 			beginResearch(ctx, ctx.sessionManager.getSessionFile());
 			ctx.ui.notify(
-				"Antigravity plan mode ON. Investigate the request, then call write_plan. " +
+				"Context Optimizer plan mode ON. Investigate the request, then call write_plan. " +
 					"Editing code is blocked until /approve.",
 				"info",
 			);
@@ -301,7 +301,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("approve", {
-		description: "Approve the pending plan and begin execution (Antigravity gate)",
+		description: "Approve the pending plan and begin execution (Context Optimizer gate)",
 		handler: async (_args, ctx) => {
 			if (state.phase !== "REVIEW_PENDING") {
 				ctx.ui.notify(`Nothing to approve — current phase is ${state.phase}.`, "warning");
@@ -313,7 +313,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("reject", {
-		description: "Reject the pending plan; send the agent back to refine it (Antigravity gate)",
+		description: "Reject the pending plan; send the agent back to refine it (Context Optimizer gate)",
 		handler: async (args, ctx) => {
 			if (state.phase !== "REVIEW_PENDING") {
 				ctx.ui.notify(`Nothing to reject — current phase is ${state.phase}.`, "warning");
@@ -345,7 +345,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("done", {
-		description: "Exit grill interview and write the plan (Antigravity)",
+		description: "Exit grill interview and write the plan (Context Optimizer)",
 		handler: async (_args, ctx) => {
 			if (!state.interview) {
 				ctx.ui.notify("Not in grill mode.", "info");
@@ -358,11 +358,11 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("status", {
-		description: "Show current Antigravity phase, artifact directory, task progress, and next action",
+		description: "Show current Context Optimizer phase, artifact directory, task progress, and next action",
 		handler: async (_args, ctx) => {
 			const dir = artifactDir() ?? "(none)";
 			const lines: string[] = [
-				`🌀 Antigravity Status`,
+				`🌀 Context Optimizer Status`,
 				`   Phase:  ${state.phase}`,
 				`   Dir:    ${dir}`,
 			];
@@ -384,7 +384,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("reset", {
-		description: "Reset Antigravity to inert and remove all artifacts for this session",
+		description: "Reset Context Optimizer to inert and remove all artifacts for this session",
 		handler: async (_args, ctx) => {
 			const dir = artifactDir();
 			if (dir) {
@@ -398,12 +398,12 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 			tasks = [];
 			setState({ phase: "INERT", artifactDir: null, interview: false });
 			updateStatus(ctx);
-			ctx.ui.notify("Antigravity reset to INERT. Artifacts cleaned.", "info");
+			ctx.ui.notify("Context Optimizer reset to INERT. Artifacts cleaned.", "info");
 		},
 	});
 
 	pi.registerShortcut(Key.ctrlAlt("p"), {
-		description: "Toggle Antigravity plan mode",
+		description: "Toggle Context Optimizer plan mode",
 		handler: async (ctx) => {
 			if (state.phase === "INERT") {
 				beginResearch(ctx, ctx.sessionManager.getSessionFile());
@@ -439,7 +439,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 			if (target && dir && (target === dir || target.startsWith(dir + "/"))) return;
 			return {
 				block: true,
-				reason: `Antigravity gate: ${event.toolName} is blocked during ${phase}. ` +
+				reason: `Context Optimizer gate: ${event.toolName} is blocked during ${phase}. ` +
 					(phaseHints[phase] ?? "Use /approve to begin execution."),
 			};
 		}
@@ -450,7 +450,7 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 			if (!isSafeReadonlyCommand(command)) {
 				return {
 					block: true,
-					reason: `Antigravity gate: this bash command is not on the read-only allowlist for ` +
+					reason: `Context Optimizer gate: this bash command is not on the read-only allowlist for ` +
 						`the ${phase} phase. ${phaseHints[phase] ?? "Use /approve to begin execution."}`,
 				};
 			}
@@ -470,7 +470,7 @@ implementation plan with the write_plan tool. Do NOT edit code — the gate bloc
 			return {
 				message: {
 					customType: "ag-plan-context",
-					content: `[ANTIGRAVITY PLAN MODE: ${state.phase}]
+					content: `[CONTEXT OPTIMIZER PLAN MODE: ${state.phase}]
 ${grill}
 
 After write_plan, STOP — the plan is open in VS Code for human review.
@@ -483,7 +483,7 @@ Editing code stays blocked until the user issues /approve.`,
 			return {
 				message: {
 					customType: "ag-review-context",
-					content: `[ANTIGRAVITY REVIEW PENDING]
+					content: `[CONTEXT OPTIMIZER REVIEW PENDING]
 A plan is pending review in plan.md. The reviewer may give feedback in chat.
 If they request changes, update the plan with write_plan. Do NOT edit code.
 Use /approve once approved, or /reject to discard.`,
@@ -498,7 +498,7 @@ Use /approve once approved, or /reject to discard.`,
 			return {
 				message: {
 					customType: "ag-exec-context",
-					content: `[ANTIGRAVITY EXECUTING]
+					content: `[CONTEXT OPTIMIZER EXECUTING]
 Status: ${statusStr}
 The DAG Dispatcher is executing the tasks in parallel via autonomous sub-agents.
 When all tasks are complete, write_walkthrough to finish.`,
@@ -511,7 +511,7 @@ When all tasks are complete, write_walkthrough to finish.`,
 			return {
 				message: {
 					customType: "ag-ready",
-					content: "[ANTIGRAVITY] pi-antigravity is loaded. Use /plan to start a structured " +
+					content: "[CONTEXT OPTIMIZER] pi-context-optimizer is loaded. Use /plan to start a structured " +
 						"plan\u2192review\u2192execute\u2192walkthrough workflow, or just start coding normally.",
 					display: false,
 				},

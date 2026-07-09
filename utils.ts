@@ -1,5 +1,5 @@
 /**
- * Pure utilities for the pi-antigravity extension.
+ * Pure utilities for the pi-context-optimizer extension.
  *
  * The bash-safety classifier and the todo extract/mark helpers are lifted from
  * pi's bundled `examples/extensions/plan-mode/utils.ts` (same semantics) so the
@@ -17,7 +17,7 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 /**
  * Directory that holds all plan artifacts for one session.
  *
- *   <cwd>/.pi/antigravity/<session-basename>/
+ *   <cwd>/.pi/context-optimizer/<session-basename>/
  *      plan.md
  *      tasks.md
  *      walkthrough.md
@@ -30,7 +30,7 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
  */
 export function artifactDirFor(cwd: string, sessionFile: string | null | undefined): string {
 	const name = sessionFile ? safeFolderName(basename(sessionFile)) : "ad-hoc";
-	return join(cwd, CONFIG_DIR_NAME, "antigravity", name);
+	return join(cwd, CONFIG_DIR_NAME, "context-optimizer", name);
 }
 
 function safeFolderName(s: string): string {

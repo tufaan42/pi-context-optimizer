@@ -1,0 +1,10 @@
+test/
+*.ts
+!dist/**/*.d.ts
+tsconfig.json
+node_modules/
+.git/
+plan.md
+tasks.md
+walkthrough.md
+*.tgz

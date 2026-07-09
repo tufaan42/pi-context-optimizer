@@ -99,7 +99,7 @@ export class Dispatcher {
 		const prompt = buildStepPrompt(step, this.steps, this.predecessorResults, this.planSummary);
 
 		try {
-			this.ctx.ui.notify(`[Antigravity Dispatcher] Spawning sub-agent for Step ${step.id}: ${step.text}`, "info");
+			this.ctx.ui.notify(`[Context Optimizer Dispatcher] Spawning sub-agent for Step ${step.id}: ${step.text}`, "info");
 
 			// Spawn sub-agent using the subagents extension API.
 			// tsedr-runtime's global before_agent_start hook will run inside the sub-agent session.
@@ -131,7 +131,7 @@ export class Dispatcher {
 		const resultsDir = join(this.artifactDir, "step-results");
 		await writeFile(join(resultsDir, `step-${stepId}.md`), result, "utf8");
 
-		this.ctx.ui.notify(`[Antigravity Dispatcher] Step ${stepId} completed successfully!`, "info");
+		this.ctx.ui.notify(`[Context Optimizer Dispatcher] Step ${stepId} completed successfully!`, "info");
 		await this.updateTasksFile();
 
 		// Trigger dispatch loop for any newly unblocked ready steps
@@ -145,7 +145,7 @@ export class Dispatcher {
 		step.status = "failed";
 		step.error = error;
 
-		this.ctx.ui.notify(`[Antigravity Dispatcher] Step ${stepId} FAILED: ${error}`, "error");
+		this.ctx.ui.notify(`[Context Optimizer Dispatcher] Step ${stepId} FAILED: ${error}`, "error");
 
 		// Propagate failure to all downstream steps that depend on this one
 		this.propagateFailure(stepId, error);
@@ -158,7 +158,7 @@ export class Dispatcher {
 			if (s.dependencies.includes(failedId) && s.status !== "failed") {
 				s.status = "failed";
 				s.error = `Prerequisite step ${failedId} failed: ${error}`;
-				this.ctx.ui.notify(`[Antigravity Dispatcher] Cancelling Step ${s.id} because prerequisite Step ${failedId} failed.`, "warning");
+				this.ctx.ui.notify(`[Context Optimizer Dispatcher] Cancelling Step ${s.id} because prerequisite Step ${failedId} failed.`, "warning");
 				this.propagateFailure(s.id, error);
 			}
 		}

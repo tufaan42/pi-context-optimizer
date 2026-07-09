@@ -1,7 +1,7 @@
 /**
  * dag.ts — Pure DAG logic for plan step scheduling.
  *
- * Implements the Critical Path Method (CPM) from task-scheduling-formulas.md:
+ * Implements the Critical Path Method (CPM):
  *   - Parse plan markdown into a dependency DAG of PlanSteps.
  *   - Compute critical-path priorities (reverse-pass longest-path).
  *   - Identify ready steps (all predecessors done).
