@@ -48,6 +48,8 @@ export interface ToolDeps {
 	onTasksUpdated: (done: number, total: number) => Promise<void>;
 	/** Called after write_walkthrough to reset status. */
 	onWalkthroughWritten: () => Promise<void>;
+	/** Get active dispatcher status if running. */
+	getDispatcherStatus?: () => { done: number; inFlight: number; failed: number; queued: number; total: number } | null;
 }
 
 export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
@@ -55,6 +57,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
 	registerUpdateTasks(pi, deps);
 	registerWalkthrough(pi, deps);
 	registerKnowledgeItem(pi, deps);
+	registerDispatchStatus(pi, deps);
 }
 
 function ok(text: string, extra?: Record<string, unknown>) {
@@ -79,13 +82,16 @@ function registerWritePlan(pi: ExtensionAPI, deps: ToolDeps): void {
 		promptGuidelines: [
 			"Use write_plan to publish the implementation plan as a reviewable file. " +
 				"After write_plan returns, stop and wait for human approval before editing code.",
+			"Design the plan with numbered tasks. If a task depends on other tasks, explicitly " +
+				"annotate it in the step text using the format: `Step N (depends: X, Y): task description`. " +
+				"This allows the task scheduler to run independent tasks in parallel.",
 		],
 		parameters: Type.Object({
 			content: Type.String({ description: "Full markdown body of the plan." }),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const s = deps.getState();
-			if (s.phase !== "RESEARCHING" && s.phase !== "PLAN_DRAFTING") {
+			if (s.phase !== "RESEARCHING" && s.phase !== "PLAN_DRAFTING" && s.phase !== "REVIEW_PENDING") {
 				throw new Error(
 					`write_plan is only valid during RESEARCHING/PLAN_DRAFTING (current: ${s.phase}).`,
 				);
@@ -240,6 +246,36 @@ function registerKnowledgeItem(pi: ExtensionAPI, _deps: ToolDeps): void {
 			});
 			return ok(`Knowledge item appended to ${path}.`, { knowledgePath: path });
 		},
+	});
+}
+
+// ---------------------------------------------------------------------------
+// dispatch_status
+// ---------------------------------------------------------------------------
+
+function registerDispatchStatus(pi: ExtensionAPI, deps: ToolDeps): void {
+	pi.registerTool({
+		name: "dispatch_status",
+		label: "Dispatch Status",
+		description: "Query the status of the DAG task dispatcher during EXECUTING phase.",
+		promptSnippet: "Get DAG execution progress",
+		promptGuidelines: [
+			"Use dispatch_status to check which steps are done, in-flight, failed, or queued."
+		],
+		parameters: Type.Object({}),
+		async execute(_id, _params, _signal, _onUpdate, _ctx) {
+			const s = deps.getState();
+			if (s.phase !== "EXECUTING") {
+				throw new Error("dispatch_status is only valid during EXECUTING phase.");
+			}
+			if (deps.getDispatcherStatus) {
+				const status = deps.getDispatcherStatus();
+				if (status) {
+					return ok(`Dispatcher status: ${status.done}/${status.total} done (${status.inFlight} in-flight, ${status.queued} queued, ${status.failed} failed).`, status);
+				}
+			}
+			return ok("No active dispatcher running.");
+		}
 	});
 }
 

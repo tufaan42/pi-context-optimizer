@@ -30,11 +30,13 @@ test("isSafeReadonlyCommand blocks mutations", () => {
 });
 
 test("extractTaskItems reads numbered steps under a Plan:/Tasks: header", () => {
-	const msg = `Here is the plan:\n\nPlan:\n1. Refactor auth service\n2. Add tests for login\n3. Update docs\n\nDone.`;
+	const msg = `Here is the plan:\n\nPlan:\n1. Refactor auth service\n2. Add tests for login (depends: 1)\n3. Update docs\n\nDone.`;
 	const items = extractTaskItems(msg);
 	assert.equal(items.length, 3);
 	assert.equal(items[0]?.step, 1);
 	assert.equal(items[0]?.text, "Refactor auth service");
+	assert.deepEqual(items[1]?.dependencies, [1]);
+	assert.equal(items[1]?.text, "Add tests for login");
 	assert.equal(items[2]?.step, 3);
 });
 

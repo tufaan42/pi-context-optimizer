@@ -22,7 +22,7 @@
  * See /Users/admin/.pi/plans/review-2026-07-09/plan.md for the design doc.
  */
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { env } from "node:process";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -46,6 +46,8 @@ import {
 } from "./state.ts";
 import { startStatusWatch, readStatus, type ApprovalWatcher } from "./approval.ts";
 import { openArtifactInVSCode, pushPlanStatusToVSCode } from "./open.ts";
+
+import { Dispatcher } from "./dispatcher.ts";
 
 const PERSIST_TYPE = "antigravity";
 
@@ -176,27 +178,36 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 		updateStatus(ctx);
 	}
 
+	let dispatcher: Dispatcher | null = null;
+
 	async function beginExecution(): Promise<void> {
 		const active = pi.getActiveTools();
 		pi.setActiveTools(executeToolSet(active));
-		setState({ ...state, phase: "EXECUTING", interview: false });
+		setState({ ...state, phase: "EXECUTING", interview: false, dispatcherActive: true });
 		await writeStatus({ phase: "EXECUTING", approval: "approved" });
 		watcher?.stop();
 		watcher = null;
-		// Kick the agent to begin executing using update_tasks after each step.
+
+		const dir = artifactDir();
+		if (dir) {
+			try {
+				const planMarkdown = await readFile(join(dir, PLAN_FILE), "utf8");
+				dispatcher = new Dispatcher(pi, currentCtx(), planMarkdown, dir);
+				await dispatcher.init();
+				void dispatcher.dispatchReady();
+			} catch (e) {
+				currentCtx().ui.notify(`Failed to launch dispatcher: ${e}`, "error");
+			}
+		}
+
 		pi.sendMessage(
-			{ customType: "ag-approved", content: "Plan approved. Begin execution.", display: true },
+			{ customType: "ag-approved", content: "Plan approved. DAG Dispatcher launched.", display: true },
 			{ triggerTurn: true, deliverAs: "followUp" },
-		);
-		pi.sendUserMessage(
-			"Plan approved. Execute it now. Use update_tasks to keep tasks.md current after each step; " +
-				"when finished write_walkthrough.",
-			{ deliverAs: "followUp" },
 		);
 	}
 
 	async function rejectPlan(reason: string): Promise<void> {
-		setState({ ...state, phase: "PLAN_DRAFTING", interview: false });
+		setState({ ...state, phase: "PLAN_DRAFTING", interview: false, dispatcherActive: false });
 		await writeStatus({ phase: "PLAN_DRAFTING", approval: "rejected", reason });
 		pi.sendMessage(
 			{
@@ -246,8 +257,12 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 			await writeStatus({ phase: "INERT", approval: "none", done: tasks.filter((t) => t.status === "done").length, total: tasks.length });
 			watcher?.stop();
 			watcher = null;
+			dispatcher = null;
 			updateStatus(currentCtx());
 		},
+		getDispatcherStatus() {
+			return dispatcher ? dispatcher.getStatus() : null;
+		}
 	};
 	registerTools(pi, deps);
 
@@ -262,6 +277,12 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 	// -----------------------------------------------------------------
 	pi.registerFlag("ag-plan", {
 		description: "Start the session in Antigravity plan (read-only research) mode",
+		type: "boolean",
+		default: false,
+	});
+
+	pi.registerFlag("ag-exec", {
+		description: "Start the session directly in execution mode (plan already prepared)",
 		type: "boolean",
 		default: false,
 	});
@@ -336,6 +357,51 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("status", {
+		description: "Show current Antigravity phase, artifact directory, task progress, and next action",
+		handler: async (_args, ctx) => {
+			const dir = artifactDir() ?? "(none)";
+			const lines: string[] = [
+				`🌀 Antigravity Status`,
+				`   Phase:  ${state.phase}`,
+				`   Dir:    ${dir}`,
+			];
+			if (state.phase === "EXECUTING") {
+				const done = tasks.filter((t) => t.status === "done").length;
+				lines.push(`   Tasks:  ${done}/${tasks.length} done`);
+			}
+			const hints: Record<string, string> = {
+				INERT: "Use /plan to start a structured workflow",
+				RESEARCHING: "Investigate the request, then call write_plan to submit for review",
+				PLAN_DRAFTING: "Write the implementation plan with write_plan, then use /approve",
+				REVIEW_PENDING: "Review plan.md in VS Code, then /approve or /reject",
+				EXECUTING: "Execute plan steps and call update_tasks after each; when done, write_walkthrough",
+			};
+			lines.push(`   Next:   ${hints[state.phase] ?? ""}`);
+			if (state.interview) lines.push(`   Grill:  active (use /done to exit)`);
+			ctx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
+	pi.registerCommand("reset", {
+		description: "Reset Antigravity to inert and remove all artifacts for this session",
+		handler: async (_args, ctx) => {
+			const dir = artifactDir();
+			if (dir) {
+				try {
+					await rm(dir, { recursive: true, force: true });
+				} catch { /* ignore */ }
+			}
+			restoreToolSet();
+			watcher?.stop();
+			watcher = null;
+			tasks = [];
+			setState({ phase: "INERT", artifactDir: null, interview: false });
+			updateStatus(ctx);
+			ctx.ui.notify("Antigravity reset to INERT. Artifacts cleaned.", "info");
+		},
+	});
+
 	pi.registerShortcut(Key.ctrlAlt("p"), {
 		description: "Toggle Antigravity plan mode",
 		handler: async (ctx) => {
@@ -360,6 +426,11 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 		const gating = phase === "RESEARCHING" || phase === "PLAN_DRAFTING" || phase === "REVIEW_PENDING";
 		if (!gating) return;
 
+		const phaseHints: Record<string, string> = {
+			RESEARCHING: "Use write_plan to draft a plan, then use /approve to begin execution.",
+			PLAN_DRAFTING: "Use write_plan to submit your plan for review, then /approve to execute.",
+			REVIEW_PENDING: "A plan is pending review. Use /approve to accept or /reject to revise.",
+		};
 		if (event.toolName === "edit" || event.toolName === "write") {
 			const input = event.input as { path?: string };
 			const target = input.path;
@@ -368,8 +439,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 			if (target && dir && (target === dir || target.startsWith(dir + "/"))) return;
 			return {
 				block: true,
-				reason: `Antigravity gate: ${event.toolName} is blocked until the plan is approved. ` +
-					`Use /approve to begin execution.`,
+				reason: `Antigravity gate: ${event.toolName} is blocked during ${phase}. ` +
+					(phaseHints[phase] ?? "Use /approve to begin execution."),
 			};
 		}
 
@@ -379,8 +450,8 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
 			if (!isSafeReadonlyCommand(command)) {
 				return {
 					block: true,
-					reason: `Antigravity gate: this bash command is not on the read-only allowlist for the ` +
-						`plan phase. Inspect with read/grep/find/ls. Use /approve to begin execution.`,
+					reason: `Antigravity gate: this bash command is not on the read-only allowlist for ` +
+						`the ${phase} phase. ${phaseHints[phase] ?? "Use /approve to begin execution."}`,
 				};
 			}
 		}
@@ -413,25 +484,40 @@ Editing code stays blocked until the user issues /approve.`,
 				message: {
 					customType: "ag-review-context",
 					content: `[ANTIGRAVITY REVIEW PENDING]
-A plan has been written to plan.md. Do NOT make changes. Wait for /approve or /reject.
-If the reviewer asks for changes, update the plan with write_plan.`,
+A plan is pending review in plan.md. The reviewer may give feedback in chat.
+If they request changes, update the plan with write_plan. Do NOT edit code.
+Use /approve once approved, or /reject to discard.`,
 					display: false,
 				},
 			};
 		}
 		if (state.phase === "EXECUTING") {
-			const remaining = tasks.filter((t) => t.status !== "done");
-			const list = remaining.map((t) => `${t.step}. ${t.text}`).join("\n");
+			const statusStr = dispatcher
+				? `${dispatcher.getStatus().done}/${dispatcher.getStatus().total} steps done (${dispatcher.getStatus().inFlight} running, ${dispatcher.getStatus().queued} queued)`
+				: `${tasks.filter((t) => t.status === "done").length}/${tasks.length} tasks done`;
 			return {
 				message: {
 					customType: "ag-exec-context",
 					content: `[ANTIGRAVITY EXECUTING]
-${remaining.length > 0 ? `Remaining steps:\n${list}\n\n` : ""}Execute each step. After each step, call update_tasks to reflect progress.
-When the plan is complete, call write_walkthrough exactly once.`,
+Status: ${statusStr}
+The DAG Dispatcher is executing the tasks in parallel via autonomous sub-agents.
+When all tasks are complete, write_walkthrough to finish.`,
 					display: false,
 				},
 			};
 		}
+
+		if (state.phase === "INERT") {
+			return {
+				message: {
+					customType: "ag-ready",
+					content: "[ANTIGRAVITY] pi-antigravity is loaded. Use /plan to start a structured " +
+						"plan\u2192review\u2192execute\u2192walkthrough workflow, or just start coding normally.",
+					display: false,
+				},
+			};
+		}
+
 		return;
 	});
 
@@ -473,11 +559,18 @@ When the plan is complete, call write_walkthrough exactly once.`,
 			ctx.ui.notify(hint, "info");
 			return;
 		}
-		if (state.phase === "EXECUTING" && tasks.length > 0 && tasks.every((t) => t.status === "done")) {
+		const isCompleted = dispatcher 
+			? (dispatcher.getStatus().done + dispatcher.getStatus().failed) === dispatcher.getStatus().total
+			: (tasks.length > 0 && tasks.every((t) => t.status === "done" || t.status === "failed"));
+
+		if (state.phase === "EXECUTING" && isCompleted) {
+			const hasFailed = dispatcher ? dispatcher.getStatus().failed > 0 : tasks.some((t) => t.status === "failed");
 			pi.sendMessage(
 				{
 					customType: "ag-complete",
-					content: "All plan steps complete. Call write_walkthrough to finish.",
+					content: hasFailed
+						? "Plan execution completed but some steps FAILED. Please review the failed tasks and call write_walkthrough to wrap up."
+						: "All plan steps complete. Call write_walkthrough to finish.",
 					display: true,
 				},
 				{ triggerTurn: true, deliverAs: "followUp" },
@@ -502,6 +595,9 @@ When the plan is complete, call write_walkthrough exactly once.`,
 			state = restored;
 		} else if (pi.getFlag("ag-plan") === true) {
 			state = { phase: "RESEARCHING", artifactDir: artifactDirFor(ctx.cwd, event.previousSessionFile ?? null), interview: false };
+		} else if (pi.getFlag("ag-exec") === true) {
+			const agDir = artifactDirFor(ctx.cwd, event.previousSessionFile ?? null);
+			state = { phase: "EXECUTING", artifactDir: agDir, interview: false, dispatcherActive: true };
 		} else {
 			state = defaultState();
 		}
@@ -519,6 +615,13 @@ When the plan is complete, call write_walkthrough exactly once.`,
 			try {
 				const tasksMd = await readFile(join(dir, "tasks.md"), "utf8");
 				tasks = extractTaskItems(tasksMd).map((t) => ({ ...t }));
+				
+				if (state.dispatcherActive) {
+					const planMarkdown = await readFile(join(dir, PLAN_FILE), "utf8");
+					dispatcher = new Dispatcher(pi, ctx, planMarkdown, dir);
+					await dispatcher.init();
+					void dispatcher.dispatchReady();
+				}
 			} catch {
 				tasks = [];
 			}

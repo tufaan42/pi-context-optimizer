@@ -24,25 +24,27 @@ export interface AgState {
 	phase: AgPhase;
 	artifactDir: string | null;
 	interview: boolean; // /grill active: one question at a time until /done
+	dispatcherActive?: boolean;
 }
 
 export interface AgPersisted {
 	phase: AgPhase;
 	artifactDir: string | null;
 	interview: boolean;
+	dispatcherActive?: boolean;
 }
 
 export function defaultState(): AgState {
-	return { phase: "INERT", artifactDir: null, interview: false };
+	return { phase: "INERT", artifactDir: null, interview: false, dispatcherActive: false };
 }
 
 export function toPersisted(s: AgState): AgPersisted {
-	return { phase: s.phase, artifactDir: s.artifactDir, interview: s.interview };
+	return { phase: s.phase, artifactDir: s.artifactDir, interview: s.interview, dispatcherActive: s.dispatcherActive };
 }
 
 export function fromPersisted(p: AgPersisted | undefined): AgState {
 	if (!p) return defaultState();
-	return { phase: p.phase, artifactDir: p.artifactDir, interview: !!p.interview };
+	return { phase: p.phase, artifactDir: p.artifactDir, interview: !!p.interview, dispatcherActive: !!p.dispatcherActive };
 }
 
 /** status.json shape — the human/VS-Code-facing mirror. */

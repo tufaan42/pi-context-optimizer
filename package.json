@@ -1,13 +1,63 @@
 {
   "name": "pi-antigravity",
   "version": "0.1.0",
-  "description": "Antigravity-style plan→review→execute→walkthrough loop for the pi coding agent, with VS Code editor hosting via pithings/pi-vscode.",
+  "description": "Plan → Review → Execute → Walkthrough loop for the pi coding agent. A structured, gate-driven workflow engine with human-in-the-loop approval.",
   "type": "module",
-  "main": "./index.ts",
-  "keywords": ["pi-package", "pi-extension", "pi", "antigravity", "plan", "review", "approve"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build && npm test",
+    "test": "node --test --experimental-strip-types test/utils.test.ts test/dag.test.ts test/cycle.test.ts test/e2e-approve.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.78.0",
+    "@earendil-works/pi-tui": ">=0.78.0",
+    "typebox": ">=1.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "antigravity",
+    "plan",
+    "review",
+    "approve",
+    "workflow",
+    "gate",
+    "human-in-the-loop"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tufaan42/pi-antigravity.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tufaan42/pi-antigravity/issues"
+  },
+  "homepage": "https://github.com/tufaan42/pi-antigravity#readme",
+  "author": "Tufaan",
+  "license": "MIT",
   "pi": {
     "type": "extension",
-    "entry": "./index.ts"
+    "entry": "./dist/index.js"
   },
-  "license": "MIT"
+  "publishConfig": {
+    "access": "public"
+  }
 }

@@ -149,7 +149,8 @@ export function isSafeReadonlyCommand(command: string): boolean {
 export interface TaskItem {
 	step: number;
 	text: string;
-	status: "pending" | "in_progress" | "done";
+	status: "pending" | "in_progress" | "done" | "failed";
+	dependencies?: number[];
 }
 
 export function extractTaskItems(message: string): TaskItem[] {
@@ -161,9 +162,18 @@ export function extractTaskItems(message: string): TaskItem[] {
 	for (const match of section.matchAll(pattern)) {
 		const raw = match[2];
 		if (!raw) continue;
-		const text = raw.trim().replace(/\*{1,2}$/, "").trim();
+		let text = raw.trim().replace(/\*{1,2}$/, "").trim();
+		const depMatch = text.match(/\(depends?:\s*([\d,\s]+)\)/i);
+		let dependencies: number[] = [];
+		if (depMatch) {
+			dependencies = depMatch[1]!
+				.split(",")
+				.map((s) => parseInt(s.trim(), 10))
+				.filter((n) => Number.isFinite(n) && n > 0);
+			text = text.replace(/\(depends?:\s*([\d,\s]+)\)/i, "").trim();
+		}
 		if (text.length > 3 && !text.startsWith("`") && !text.startsWith("/") && !text.startsWith("-")) {
-			items.push({ step: items.length + 1, text, status: "pending" });
+			items.push({ step: items.length + 1, text, status: "pending", dependencies });
 		}
 	}
 	return items;
@@ -187,8 +197,9 @@ export function markDoneSteps(text: string, items: TaskItem[]): number {
 export function renderTasksMd(tasks: TaskItem[]): string {
 	const lines: string[] = ["# Tasks", ""];
 	for (const t of tasks) {
-		const box = t.status === "done" ? "[x]" : t.status === "in_progress" ? "[/]" : "[ ]";
-		lines.push(`- ${box} ${t.step}. ${t.text}`);
+		const box = t.status === "done" ? "[x]" : t.status === "in_progress" ? "[/]" : t.status === "failed" ? "[-]" : "[ ]";
+		const suffix = t.status === "failed" ? " (FAILED)" : "";
+		lines.push(`- ${box} ${t.step}. ${t.text}${suffix}`);
 	}
 	if (tasks.length === 0) lines.push("_(no tasks yet)_");
 	return lines.join("\n") + "\n";
