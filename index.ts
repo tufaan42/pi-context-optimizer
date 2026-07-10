@@ -46,6 +46,7 @@ import {
 } from "./state.ts";
 import { startStatusWatch, readStatus, type ApprovalWatcher } from "./approval.ts";
 import { openArtifactInVSCode, pushPlanStatusToVSCode } from "./open.ts";
+import { writeActivePointer } from "./bridge.ts";
 
 import { Dispatcher } from "./dispatcher.ts";
 
@@ -121,6 +122,13 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 		await pushPlanStatusToVSCode({
 			state: status.phase, approval: status.approval, done: status.done, total: status.total,
 		});
+		// Mirror to the stable active.json pointer (host discovery). Best-effort:
+		// a failure here must never break the workflow.
+		try {
+			await writeActivePointer(currentCtx().cwd, {
+				artifactDir: dir, phase: status.phase, approval: status.approval, done: status.done, total: status.total,
+			});
+		} catch { /* best-effort */ }
 	}
 
 	function refreshWatcher(): void {
@@ -625,6 +633,22 @@ When all tasks are complete, write_walkthrough to finish.`,
 			} catch {
 				tasks = [];
 			}
+		}
+
+		// Publish the stable active.json pointer so a host attaching mid-session
+		// (or after resume) can immediately discover the active artifact dir.
+		// Best-effort; subsequent writeStatus calls keep it in sync. The
+		// REVIEW_PENDING branch below overwrites this with the real approval.
+		if (state.artifactDir) {
+			try {
+				await writeActivePointer(ctx.cwd, {
+					artifactDir: state.artifactDir,
+					phase: state.phase,
+					approval: "none",
+					done: tasks.filter((t) => t.status === "done").length,
+					total: tasks.length,
+				});
+			} catch { /* best-effort */ }
 		}
 
 		if (state.phase === "REVIEW_PENDING") {

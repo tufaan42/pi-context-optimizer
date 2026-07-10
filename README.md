@@ -139,6 +139,28 @@ During the session, `pi-context-optimizer` creates structured artifacts under `.
 
 ---
 
+## 🔗 Host Integration (Bridge)
+
+`pi-context-optimizer` is **host-agnostic**: any tool built on `pi` — the
+original `pithings/pi-vscode` extension, **PiLot Studio**, a JetBrains plugin,
+or a custom web UI — can integrate the plan→review→execute→walkthrough flow
+**without HTTP, tokens, or in-process embedding.**
+
+The primary contract is the **filesystem artifact protocol**: the plan/tasks/
+walkthrough/status files are always written to disk, and a stable
+`active.json` pointer lets a host discover the active session by watching one
+file. The approval gate is file-based — approve/reject by writing `status.json`,
+which the extension reconciles via `fs.watch`.
+
+The original pi-vscode HTTP bridge (`openFile` / `setPlanStatus`) still works
+but is now a **cosmetic, auto-detected enhancement**, not a dependency. A host
+that provides nothing still gets a fully functional workflow.
+
+👉 **Full contract, schemas, and a minimal integration recipe:** see
+[`BRIDGE.md`](./BRIDGE.md).
+
+---
+
 ## 🧠 Context Optimization & Parallel Sub-agents
 
 ### Context Window Optimization
