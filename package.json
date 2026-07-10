@@ -1,6 +1,6 @@
 {
   "name": "pi-context-optimizer",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Plan → Review → Execute → Walkthrough loop for the pi coding agent. A structured, gate-driven workflow engine with human-in-the-loop approval.",
   "type": "module",
   "main": "./dist/index.js",
@@ -14,13 +14,14 @@
   "files": [
     "dist",
     "README.md",
+    "BRIDGE.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build && npm test",
-    "test": "node --test --experimental-strip-types test/utils.test.ts test/dag.test.ts test/cycle.test.ts test/e2e-approve.test.ts",
+    "test": "node --test --experimental-strip-types test/utils.test.ts test/dag.test.ts test/cycle.test.ts test/e2e-approve.test.ts test/bridge.test.ts",
     "typecheck": "tsc --noEmit && tsc --project test/tsconfig.json"
   },
   "peerDependencies": {
