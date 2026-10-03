@@ -20,11 +20,18 @@ export type AgPhase =
 
 export type Approval = "none" | "pending" | "approved" | "rejected";
 
+export type AgTrack = "FAST" | "STANDARD" | "GATED";
+
+export type ReviewMode = "auto" | "always" | "never";
+
 export interface AgState {
 	phase: AgPhase;
 	artifactDir: string | null;
 	interview: boolean; // /grill active: one question at a time until /done
 	dispatcherActive?: boolean;
+	track?: AgTrack;
+	reviewMode?: ReviewMode;
+	modifiedFiles?: string[];
 }
 
 export interface AgPersisted {
@@ -32,35 +39,72 @@ export interface AgPersisted {
 	artifactDir: string | null;
 	interview: boolean;
 	dispatcherActive?: boolean;
+	track?: AgTrack;
+	reviewMode?: ReviewMode;
+	modifiedFiles?: string[];
 }
 
 export function defaultState(): AgState {
-	return { phase: "INERT", artifactDir: null, interview: false, dispatcherActive: false };
+	return {
+		phase: "INERT",
+		artifactDir: null,
+		interview: false,
+		dispatcherActive: false,
+		track: "STANDARD",
+		reviewMode: "auto",
+		modifiedFiles: [],
+	};
 }
 
 export function toPersisted(s: AgState): AgPersisted {
-	return { phase: s.phase, artifactDir: s.artifactDir, interview: s.interview, dispatcherActive: s.dispatcherActive };
+	return {
+		phase: s.phase,
+		artifactDir: s.artifactDir,
+		interview: s.interview,
+		dispatcherActive: s.dispatcherActive,
+		track: s.track,
+		reviewMode: s.reviewMode,
+		modifiedFiles: s.modifiedFiles,
+	};
 }
 
 export function fromPersisted(p: AgPersisted | undefined): AgState {
 	if (!p) return defaultState();
-	return { phase: p.phase, artifactDir: p.artifactDir, interview: !!p.interview, dispatcherActive: !!p.dispatcherActive };
+	return {
+		phase: p.phase,
+		artifactDir: p.artifactDir,
+		interview: !!p.interview,
+		dispatcherActive: !!p.dispatcherActive,
+		track: p.track ?? "STANDARD",
+		reviewMode: p.reviewMode ?? "auto",
+		modifiedFiles: p.modifiedFiles ?? [],
+	};
 }
 
 /** status.json shape — the human/VS-Code-facing mirror. */
 export interface StatusFile {
 	phase: AgPhase;
 	approval: Approval;
+	track?: AgTrack;
+	reviewMode?: ReviewMode;
 	reason?: string;
 	done: number;
 	total: number;
 	updatedAt: string;
 }
 
-export function initialStatusFile(phase: AgPhase, total = 0, done = 0): StatusFile {
+export function initialStatusFile(
+	phase: AgPhase,
+	total = 0,
+	done = 0,
+	track?: AgTrack,
+	reviewMode?: ReviewMode,
+): StatusFile {
 	return {
 		phase,
 		approval: phase === "REVIEW_PENDING" ? "pending" : "none",
+		track,
+		reviewMode,
 		done,
 		total,
 		updatedAt: new Date().toISOString(),

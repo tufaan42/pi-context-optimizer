@@ -30,7 +30,16 @@ import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { isSafeReadonlyCommand, markDoneSteps, extractTaskItems, type TaskItem } from "./utils.ts";
+import {
+	isSafeReadonlyCommand,
+	markDoneSteps,
+	extractTaskItems,
+	type TaskItem,
+	isProtectedPath,
+	isDestructiveBash,
+	classifyTaskRisk,
+	FAST_TRACK_MAX_FILES,
+} from "./utils.ts";
 import {
 	artifactDirFor,
 	PLAN_FILE,
@@ -43,6 +52,8 @@ import {
 	toPersisted,
 	type AgState,
 	type StatusFile,
+	type AgTrack,
+	type ReviewMode,
 } from "./state.ts";
 import { startStatusWatch, readStatus, type ApprovalWatcher } from "./approval.ts";
 import { openArtifactInVSCode, pushPlanStatusToVSCode } from "./open.ts";
@@ -54,16 +65,16 @@ const PERSIST_TYPE = "context-optimizer";
 
 // Tools available (removed/restored by setActiveTools per phase).
 const RESEARCH_TOOLS_BASE = new Set([
-	"read", "bash", "grep", "find", "ls", "agent", // read-only exploration + subagents
+	"read", "bash", "grep", "find", "ls", "agent", "subagent", "subagents_enable", "bg_wait", // read-only exploration + subagents
 	"write_plan", "write_knowledge_item",
 ]);
 const PLANDRAFT_TOOLS = new Set([
-	"read", "bash", "grep", "find", "ls", "agent",
+	"read", "bash", "grep", "find", "ls", "agent", "subagent", "subagents_enable", "bg_wait",
 	"write_plan", "write_knowledge_item",
 ]);
 const EXECUTE_TOOLS_ENSURE = new Set([
 	"write_plan" /* not callable in EXEC but harmless to keep */, "update_tasks",
-	"write_walkthrough", "write_knowledge_item",
+	"write_walkthrough", "write_knowledge_item", "subagent", "bg_wait",
 ]);
 const PLAN_MANAGED_TOOLS = new Set<string>([
 	...RESEARCH_TOOLS_BASE, ...PLANDRAFT_TOOLS, ...EXECUTE_TOOLS_ENSURE,
@@ -86,6 +97,7 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 	let tasks: TaskItem[] = [];
 	let toolsBefore: string[] | undefined; // tool set captured on entering plan mode
 	let watcher: ApprovalWatcher | null = null;
+	let _completionNotified = false;
 
 	// -----------------------------------------------------------------
 	// State mutators + persistence
@@ -112,6 +124,8 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 		const status: StatusFile = {
 			phase: partial.phase ?? current?.phase ?? state.phase,
 			approval: partial.approval ?? current?.approval ?? "none",
+			track: partial.track ?? current?.track ?? state.track,
+			reviewMode: partial.reviewMode ?? current?.reviewMode ?? state.reviewMode,
 			done: partial.done ?? current?.done ?? 0,
 			total: partial.total ?? current?.total ?? 0,
 			updatedAt: new Date().toISOString(),
@@ -176,14 +190,77 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 	// -----------------------------------------------------------------
 	// Phase transitions
 	// -----------------------------------------------------------------
-	function beginResearch(ctx: ExtensionContext, sessionFile: string | null | undefined): void {
+	function beginResearch(ctx: ExtensionContext, sessionFile: string | null | undefined, track: AgTrack = "STANDARD"): void {
 		const dir = artifactDirFor(ctx.cwd, sessionFile);
-		state = { phase: "RESEARCHING", artifactDir: dir, interview: false };
+		state = { phase: "RESEARCHING", artifactDir: dir, interview: false, track, reviewMode: state.reviewMode, modifiedFiles: [] };
 		if (toolsBefore === undefined) toolsBefore = pi.getActiveTools();
 		pi.setActiveTools(researchToolSet(toolsBefore)); // drops edit/write
 		pi.appendEntry(PERSIST_TYPE, toPersisted(state));
 		void mkdir(dir, { recursive: true });
 		updateStatus(ctx);
+	}
+
+	async function beginFastExecution(ctx: ExtensionContext, sessionFile: string | null | undefined): Promise<void> {
+		const dir = artifactDirFor(ctx.cwd, sessionFile);
+		await mkdir(dir, { recursive: true });
+		if (toolsBefore === undefined) toolsBefore = pi.getActiveTools();
+		pi.setActiveTools(executeToolSet(toolsBefore));
+		state = {
+			phase: "EXECUTING",
+			artifactDir: dir,
+			interview: false,
+			track: "FAST",
+			reviewMode: state.reviewMode ?? "auto",
+			dispatcherActive: false,
+			modifiedFiles: [],
+		};
+		pi.appendEntry(PERSIST_TYPE, toPersisted(state));
+		await writeStatus({
+			phase: "EXECUTING",
+			approval: "approved",
+			track: "FAST",
+			reviewMode: state.reviewMode,
+		});
+		watcher?.stop();
+		watcher = null;
+		updateStatus(ctx);
+		pi.sendMessage(
+			{
+				customType: "ag-fast-started",
+				content: "⚡ Fast Track active: Direct execution enabled (Execute → Walkthrough). Make edits directly, verify, and finish with write_walkthrough.",
+				display: true,
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+	}
+
+	async function escalateToReview(reason: string): Promise<void> {
+		state = {
+			...state,
+			phase: "REVIEW_PENDING",
+			track: "GATED",
+			dispatcherActive: false,
+		};
+		if (toolsBefore === undefined) toolsBefore = pi.getActiveTools();
+		pi.setActiveTools(researchToolSet(toolsBefore));
+		pi.appendEntry(PERSIST_TYPE, toPersisted(state));
+		await writeStatus({
+			phase: "REVIEW_PENDING",
+			approval: "pending",
+			track: "GATED",
+			reviewMode: state.reviewMode,
+			reason,
+		});
+		refreshWatcher();
+		updateStatus(currentCtx());
+		pi.sendMessage(
+			{
+				customType: "ag-escalated",
+				content: `🚨 **Fast Track Escalated to REVIEW_PENDING**\nReason: ${reason}\nMutations are locked. Please call write_plan and /approve to proceed.`,
+				display: true,
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
 	}
 
 	let dispatcher: Dispatcher | null = null;
@@ -200,7 +277,30 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 		if (dir) {
 			try {
 				const planMarkdown = await readFile(join(dir, PLAN_FILE), "utf8");
-				dispatcher = new Dispatcher(pi, currentCtx(), planMarkdown, dir);
+				_completionNotified = false;
+				dispatcher = new Dispatcher(pi, currentCtx(), planMarkdown, dir, undefined, undefined, undefined, undefined, (status) => {
+					if (_completionNotified) return;
+					_completionNotified = true;
+					if (status.failed > 0) {
+						pi.sendMessage(
+							{
+								customType: "ag-complete",
+								content: "Plan execution completed but some steps FAILED. Please review the failed tasks and call write_walkthrough to wrap up.",
+								display: true,
+							},
+							{ triggerTurn: true, deliverAs: "followUp" },
+						);
+					} else {
+						pi.sendMessage(
+							{
+								customType: "ag-complete",
+								content: "All plan steps complete. Call write_walkthrough to finish.",
+								display: true,
+							},
+							{ triggerTurn: true, deliverAs: "followUp" },
+						);
+					}
+				}, (done, total) => writeStatus({ done, total }));
 				await dispatcher.init();
 				void dispatcher.dispatchReady();
 			} catch (e) {
@@ -231,9 +331,21 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 	// UI status
 	// -----------------------------------------------------------------
 	function updateStatus(ctx: ExtensionContext): void {
-		if (state.phase === "EXECUTING" && tasks.length > 0) {
-			const done = tasks.filter((t) => t.status === "done").length;
-			ctx.ui.setStatus("ag", ctx.ui.theme.fg("accent", `ag:exec ${done}/${tasks.length}`));
+		// Guard: in non-TUI contexts (e.g., RPC / chat participant), ctx.ui.theme
+		// or ctx.ui.setStatus may be absent. Skip the status-bar update there
+		// rather than crashing the whole workflow (the on-disk status.json is
+		// still the source of truth for hosts).
+		if (!ctx.ui?.setStatus || !ctx.ui?.theme) return;
+		if (state.phase === "EXECUTING") {
+			if (state.track === "FAST") {
+				const touched = state.modifiedFiles?.length ?? 0;
+				ctx.ui.setStatus("ag", ctx.ui.theme.fg("accent", `ag:fast (${touched}/${FAST_TRACK_MAX_FILES})`));
+			} else if (tasks.length > 0) {
+				const done = tasks.filter((t) => t.status === "done").length;
+				ctx.ui.setStatus("ag", ctx.ui.theme.fg("accent", `ag:exec ${done}/${tasks.length}`));
+			} else {
+				ctx.ui.setStatus("ag", ctx.ui.theme.fg("accent", `ag:exec`));
+			}
 		} else if (state.phase === "REVIEW_PENDING") {
 			ctx.ui.setStatus("ag", ctx.ui.theme.fg("warning", "ag:await-review"));
 		} else if (state.phase === "RESEARCHING" || state.phase === "PLAN_DRAFTING") {
@@ -252,19 +364,46 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 		setState: (next) => {
 			setState(next);
 		},
-		async onPlanSubmitted() {
-			await writeStatus({ phase: "REVIEW_PENDING", approval: "pending", total: 0, done: 0 });
+		async onPlanSubmitted(risk?: "low" | "medium" | "high") {
+			const shouldAutoApprove =
+				(state.reviewMode === "auto" && state.track !== "GATED" && risk !== "high") ||
+				(state.reviewMode === "never" && risk !== "high");
+
+			if (shouldAutoApprove) {
+				currentCtx().ui?.notify?.("Plan auto-approved (Standard Track). Launching execution...", "info");
+				await beginExecution();
+				return;
+			}
+
+			await writeStatus({
+				phase: "REVIEW_PENDING",
+				approval: "pending",
+				total: 0,
+				done: 0,
+				track: state.track,
+				reviewMode: state.reviewMode,
+			});
 			refreshWatcher();
 			updateStatus(currentCtx());
 		},
-		async onTasksUpdated(done, total) {
+		async onTasksUpdated(done, total, items) {
+			if (items) {
+				tasks = items.map((t) => ({ ...t }));
+			}
 			await writeStatus({ done, total, phase: "EXECUTING" });
 			updateStatus(currentCtx());
 		},
 		async onWalkthroughWritten() {
-			await writeStatus({ phase: "INERT", approval: "none", done: tasks.filter((t) => t.status === "done").length, total: tasks.length });
+			await writeStatus({
+				phase: "INERT",
+				approval: "none",
+				done: tasks.filter((t) => t.status === "done").length,
+				total: tasks.length,
+				track: "STANDARD",
+			});
 			watcher?.stop();
 			watcher = null;
+			dispatcher?.stop();
 			dispatcher = null;
 			updateStatus(currentCtx());
 		},
@@ -281,10 +420,186 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 	}
 
 	// -----------------------------------------------------------------
+	// Command logic — shared by registerCommand + input-event rescue
+	// -----------------------------------------------------------------
+	// The host/client may prepend context metadata (e.g. "Project Root: …") to
+	// the submitted text. pi only parses a slash command when the message
+	// STARTS with "/", so a prefixed "/plan" is never dispatched as a command —
+	// it reaches the LLM as plain text and the phase never advances. The
+	// `input` event fires in exactly that case (no command recognized), so we
+	// rescue ag-commands embedded anywhere in the text by running the same
+	// logic the registered command would and returning { action: "handled" }.
+	// The registerCommand handlers below call these same helpers, so the two
+	// paths can never drift.
+	const AG_COMMAND_NAMES = new Set(["plan", "fast", "approve", "reject", "grill", "done", "status", "reset"]);
+
+	async function doPlan(ctx: ExtensionContext): Promise<void> {
+		beginResearch(ctx, ctx.sessionManager.getSessionFile(), "GATED");
+		ctx.ui.notify(
+			"Context Optimizer plan mode ON. Investigate the request, then call write_plan. " +
+				"Editing code is blocked until /approve.",
+			"info",
+		);
+		updateStatus(ctx);
+	}
+
+	async function doFast(ctx: ExtensionContext): Promise<void> {
+		await beginFastExecution(ctx, ctx.sessionManager.getSessionFile());
+		ctx.ui.notify(
+			"Context Optimizer Fast Track ON. Direct execution enabled (Execute → Walkthrough). " +
+			"Verification gate will run at walkthrough.",
+			"info",
+		);
+		updateStatus(ctx);
+	}
+
+	async function doApprove(ctx: ExtensionContext): Promise<void> {
+		if (state.phase !== "REVIEW_PENDING") {
+			ctx.ui.notify(`Nothing to approve — current phase is ${state.phase}.`, "warning");
+			return;
+		}
+		await writeStatus({ approval: "approved" });
+		await beginExecution(); // file-watch would also fire, but call directly to be prompt
+	}
+
+	async function doReject(ctx: ExtensionContext, reason: string): Promise<void> {
+		if (state.phase !== "REVIEW_PENDING") {
+			ctx.ui.notify(`Nothing to reject — current phase is ${state.phase}.`, "warning");
+			return;
+		}
+		const r = reason.trim() || "rejected by reviewer";
+		await writeStatus({ approval: "rejected", reason: r });
+		await rejectPlan(r);
+	}
+
+	async function doGrill(ctx: ExtensionContext): Promise<void> {
+		if (state.phase !== "PLAN_DRAFTING" && state.phase !== "RESEARCHING") {
+			ctx.ui.notify(
+				`Enter /plan first (current phase: ${state.phase}). /grill refines a pending plan.`,
+				"warning",
+			);
+			return;
+		}
+		setState({ ...state, phase: "PLAN_DRAFTING", interview: true });
+		ctx.ui.notify(
+			"Grill mode ON. Ask one focused question now; loop until shared understanding, then /done.",
+			"info",
+		);
+		updateStatus(ctx);
+	}
+
+	async function doDone(ctx: ExtensionContext): Promise<void> {
+		if (!state.interview) {
+			ctx.ui.notify("Not in grill mode.", "info");
+			return;
+		}
+		setState({ ...state, interview: false });
+		ctx.ui.notify("Grill done. Call write_plan to publish the plan for review.", "info");
+		updateStatus(ctx);
+	}
+
+	async function doStatus(ctx: ExtensionContext): Promise<void> {
+		const dir = artifactDir() ?? "(none)";
+		const lines: string[] = [
+			`🌀 Context Optimizer Status`,
+			`   Phase:  ${state.phase}`,
+			`   Track:  ${state.track ?? "STANDARD"}`,
+			`   Review: ${state.reviewMode ?? "auto"}`,
+			`   Dir:    ${dir}`,
+		];
+		if (state.phase === "EXECUTING") {
+			if (state.track === "FAST") {
+				const touched = state.modifiedFiles?.length ?? 0;
+				lines.push(`   Touched: ${touched}/${FAST_TRACK_MAX_FILES} files`);
+			} else {
+				const done = tasks.filter((t) => t.status === "done").length;
+				lines.push(`   Tasks:  ${done}/${tasks.length} done`);
+			}
+		}
+		const hints: Record<string, string> = {
+			INERT: "Use /fast for quick Execute→Walkthrough or /plan for structured planning",
+			RESEARCHING: "Investigate the request, then call write_plan to submit for review",
+			PLAN_DRAFTING: "Write the implementation plan with write_plan, then use /approve",
+			REVIEW_PENDING: "Review plan.md in VS Code, then /approve or /reject",
+			EXECUTING: state.track === "FAST"
+				? "Apply edits directly, run tests/checks, then call write_walkthrough"
+				: "Execute plan steps and call update_tasks after each; when done, write_walkthrough",
+		};
+		lines.push(`   Next:   ${hints[state.phase] ?? ""}`);
+		if (state.interview) lines.push(`   Grill:  active (use /done to exit)`);
+		ctx.ui.notify(lines.join("\n"), "info");
+	}
+
+	async function doReset(ctx: ExtensionContext): Promise<void> {
+		const dir = artifactDir();
+		if (dir) {
+			try {
+				await rm(dir, { recursive: true, force: true });
+			} catch { /* ignore */ }
+		}
+		restoreToolSet();
+		watcher?.stop();
+		watcher = null;
+		dispatcher?.stop();
+		dispatcher = null;
+		tasks = [];
+		setState({
+			phase: "INERT",
+			artifactDir: null,
+			interview: false,
+			track: "STANDARD",
+			reviewMode: state.reviewMode,
+			modifiedFiles: [],
+		});
+		updateStatus(ctx);
+		ctx.ui.notify("Context Optimizer reset to INERT. Artifacts cleaned.", "info");
+	}
+
+	/** Route a parsed ag-command name (+ args) to its handler. Returns true if handled. */
+	async function dispatchAgCommand(name: string, args: string, ctx: ExtensionContext): Promise<boolean> {
+		switch (name) {
+			case "plan": await doPlan(ctx); return true;
+			case "fast": await doFast(ctx); return true;
+			case "approve": await doApprove(ctx); return true;
+			case "reject": await doReject(ctx, args); return true;
+			case "grill": await doGrill(ctx); return true;
+			case "done": await doDone(ctx); return true;
+			case "status": await doStatus(ctx); return true;
+			case "reset": await doReset(ctx); return true;
+			default: return false;
+		}
+	}
+
+	/**
+	 * Parse the first embedded ag-command line (e.g. "/plan", "/reject needs work")
+	 * from text that may be prefixed with non-command metadata. pi requires a
+	 * message to START with "/" to parse a command; this rescues commands that
+	 * follow a metadata prefix. Returns { name, args } or null if none found.
+	 */
+	function parseEmbeddedAgCommand(text: string): { name: string; args: string } | null {
+		for (const rawLine of text.split("\n")) {
+			const line = rawLine.trim();
+			if (!line.startsWith("/")) continue;
+			const spaceIndex = line.indexOf(" ");
+			const name = (spaceIndex === -1 ? line.slice(1) : line.slice(1, spaceIndex)).toLowerCase();
+			if (!AG_COMMAND_NAMES.has(name)) continue;
+			const args = spaceIndex === -1 ? "" : line.slice(spaceIndex + 1).trim();
+			return { name, args };
+		}
+		return null;
+	}
+
+	// -----------------------------------------------------------------
 	// Flags / commands / shortcuts
 	// -----------------------------------------------------------------
 	pi.registerFlag("ag-plan", {
 		description: "Start the session in Context Optimizer plan (read-only research) mode",
+		type: "boolean",
+		default: false,
+	});
+
+	pi.registerFlag("ag-fast", {
+		description: "Start the session directly in Fast Track execution mode (Execute → Walkthrough)",
 		type: "boolean",
 		default: false,
 	});
@@ -295,119 +610,64 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 		default: false,
 	});
 
+	pi.registerFlag("ag-review", {
+		description: "Review gating mode: auto (adaptive), always (strict), or never (autonomous)",
+		type: "string",
+		default: "auto",
+	});
+
 	pi.registerCommand("plan", {
 		description: "Enter Context Optimizer plan mode (read-only research → written plan → human review)",
-		handler: async (_args, ctx) => {
-			beginResearch(ctx, ctx.sessionManager.getSessionFile());
-			ctx.ui.notify(
-				"Context Optimizer plan mode ON. Investigate the request, then call write_plan. " +
-					"Editing code is blocked until /approve.",
-				"info",
-			);
-			updateStatus(ctx);
-		},
+		handler: async (_args, ctx) => { await doPlan(ctx); },
+	});
+
+	pi.registerCommand("fast", {
+		description: "Enter Fast Track mode (direct Execute → Walkthrough without plan review)",
+		handler: async (_args, ctx) => { await doFast(ctx); },
 	});
 
 	pi.registerCommand("approve", {
 		description: "Approve the pending plan and begin execution (Context Optimizer gate)",
-		handler: async (_args, ctx) => {
-			if (state.phase !== "REVIEW_PENDING") {
-				ctx.ui.notify(`Nothing to approve — current phase is ${state.phase}.`, "warning");
-				return;
-			}
-			await writeStatus({ approval: "approved" });
-			await beginExecution(); // file-watch would also fire, but call directly to be prompt
-		},
+		handler: async (_args, ctx) => { await doApprove(ctx); },
 	});
 
 	pi.registerCommand("reject", {
 		description: "Reject the pending plan; send the agent back to refine it (Context Optimizer gate)",
-		handler: async (args, ctx) => {
-			if (state.phase !== "REVIEW_PENDING") {
-				ctx.ui.notify(`Nothing to reject — current phase is ${state.phase}.`, "warning");
-				return;
-			}
-			const reason = (args ?? "").trim() || "rejected by reviewer";
-			await writeStatus({ approval: "rejected", reason });
-			await rejectPlan(reason);
-		},
+		handler: async (args, ctx) => { await doReject(ctx, args ?? ""); },
 	});
 
 	pi.registerCommand("grill", {
 		description: "Interview-driven plan drafting: ask one clarifying question at a time until /done",
-		handler: async (_args, ctx) => {
-			if (state.phase !== "PLAN_DRAFTING" && state.phase !== "RESEARCHING") {
-				ctx.ui.notify(
-					`Enter /plan first (current phase: ${state.phase}). /grill refines a pending plan.`,
-					"warning",
-				);
-				return;
-			}
-			setState({ ...state, phase: "PLAN_DRAFTING", interview: true });
-			ctx.ui.notify(
-				"Grill mode ON. Ask one focused question now; loop until shared understanding, then /done.",
-				"info",
-			);
-			updateStatus(ctx);
-		},
+		handler: async (_args, ctx) => { await doGrill(ctx); },
 	});
 
 	pi.registerCommand("done", {
 		description: "Exit grill interview and write the plan (Context Optimizer)",
-		handler: async (_args, ctx) => {
-			if (!state.interview) {
-				ctx.ui.notify("Not in grill mode.", "info");
-				return;
-			}
-			setState({ ...state, interview: false });
-			ctx.ui.notify("Grill done. Call write_plan to publish the plan for review.", "info");
-			updateStatus(ctx);
-		},
+		handler: async (_args, ctx) => { await doDone(ctx); },
 	});
 
 	pi.registerCommand("status", {
 		description: "Show current Context Optimizer phase, artifact directory, task progress, and next action",
-		handler: async (_args, ctx) => {
-			const dir = artifactDir() ?? "(none)";
-			const lines: string[] = [
-				`🌀 Context Optimizer Status`,
-				`   Phase:  ${state.phase}`,
-				`   Dir:    ${dir}`,
-			];
-			if (state.phase === "EXECUTING") {
-				const done = tasks.filter((t) => t.status === "done").length;
-				lines.push(`   Tasks:  ${done}/${tasks.length} done`);
-			}
-			const hints: Record<string, string> = {
-				INERT: "Use /plan to start a structured workflow",
-				RESEARCHING: "Investigate the request, then call write_plan to submit for review",
-				PLAN_DRAFTING: "Write the implementation plan with write_plan, then use /approve",
-				REVIEW_PENDING: "Review plan.md in VS Code, then /approve or /reject",
-				EXECUTING: "Execute plan steps and call update_tasks after each; when done, write_walkthrough",
-			};
-			lines.push(`   Next:   ${hints[state.phase] ?? ""}`);
-			if (state.interview) lines.push(`   Grill:  active (use /done to exit)`);
-			ctx.ui.notify(lines.join("\n"), "info");
-		},
+		handler: async (_args, ctx) => { await doStatus(ctx); },
 	});
 
 	pi.registerCommand("reset", {
 		description: "Reset Context Optimizer to inert and remove all artifacts for this session",
-		handler: async (_args, ctx) => {
-			const dir = artifactDir();
-			if (dir) {
-				try {
-					await rm(dir, { recursive: true, force: true });
-				} catch { /* ignore */ }
-			}
-			restoreToolSet();
-			watcher?.stop();
-			watcher = null;
-			tasks = [];
-			setState({ phase: "INERT", artifactDir: null, interview: false });
-			updateStatus(ctx);
-			ctx.ui.notify("Context Optimizer reset to INERT. Artifacts cleaned.", "info");
-		},
+		handler: async (_args, ctx) => { await doReset(ctx); },
+	});
+
+	// Rescue ag-commands that were not parsed as slash commands because the host
+	// prepended metadata to the user's text (pi requires text.startsWith("/")).
+	// The `input` event fires only when no command was recognized — exactly this
+	// case — so we detect the embedded command, run the same logic the registered
+	// command would, and suppress the LLM prompt via { action: "handled" }.
+	pi.on("input", async (event, ctx) => {
+		// Don't intercept messages injected by other extensions.
+		if (event.source === "extension") return { action: "continue" as const };
+		const parsed = parseEmbeddedAgCommand(event.text);
+		if (!parsed) return { action: "continue" as const };
+		await dispatchAgCommand(parsed.name, parsed.args, ctx);
+		return { action: "handled" as const };
 	});
 
 	pi.registerShortcut(Key.ctrlAlt("p"), {
@@ -421,6 +681,8 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 				setState({ ...state, phase: "INERT", interview: false });
 				watcher?.stop();
 				watcher = null;
+				dispatcher?.stop();
+				dispatcher = null;
 			}
 			updateStatus(ctx);
 		},
@@ -428,9 +690,62 @@ export default function contextOptimizerExtension(pi: ExtensionAPI): void {
 
 	// -----------------------------------------------------------------
 	// GATE: tool_call — block mutations except to artifact dir / except EXECUTING
+	// Plus: Fast Track safety guards & mid-run escalation
 	// -----------------------------------------------------------------
 	pi.on("tool_call", async (event) => {
 		const phase = state.phase;
+
+		// 1. FAST Track Invariant Enforcement & Blast Radius Cap during EXECUTING
+		if (phase === "EXECUTING" && state.track === "FAST") {
+			if (event.toolName === "edit" || event.toolName === "write") {
+				const input = event.input as { path?: string };
+				const target = input.path;
+				const dir = artifactDir();
+				// Always allow writes inside the artifact dir (e.g. walkthrough.md)
+				if (target && dir && (target === dir || target.startsWith(dir + "/"))) return;
+
+				if (target) {
+					// Check protected paths
+					if (isProtectedPath(target)) {
+						await escalateToReview(`Attempted to modify protected configuration path: ${target}`);
+						return {
+							block: true,
+							reason: `Context Optimizer: Fast Track halted. Modifying protected path '${target}' requires manual review. Escalated to REVIEW_PENDING. Call write_plan and await /approve.`,
+						};
+					}
+
+					// Check blast radius
+					const currentModified = new Set(state.modifiedFiles ?? []);
+					currentModified.add(target);
+					if (currentModified.size > FAST_TRACK_MAX_FILES) {
+						await escalateToReview(
+							`Fast Track file modification threshold (${FAST_TRACK_MAX_FILES} files) exceeded by editing '${target}'`,
+						);
+						return {
+							block: true,
+							reason: `Context Optimizer: Fast Track halted. File modification threshold (${FAST_TRACK_MAX_FILES} files) exceeded. Escalated to REVIEW_PENDING. Call write_plan and await /approve.`,
+						};
+					}
+
+					state.modifiedFiles = Array.from(currentModified);
+					pi.appendEntry(PERSIST_TYPE, toPersisted(state));
+				}
+			}
+
+			if (event.toolName === "bash") {
+				const input = event.input as { command?: string };
+				const command = input.command ?? "";
+				if (isDestructiveBash(command)) {
+					await escalateToReview(`Attempted destructive bash command: ${command}`);
+					return {
+						block: true,
+						reason: `Context Optimizer: Fast Track halted. Destructive bash command requires review. Escalated to REVIEW_PENDING. Call write_plan and await /approve.`,
+					};
+				}
+			}
+			return;
+		}
+
 		const gating = phase === "RESEARCHING" || phase === "PLAN_DRAFTING" || phase === "REVIEW_PENDING";
 		if (!gating) return;
 
@@ -500,6 +815,21 @@ Use /approve once approved, or /reject to discard.`,
 			};
 		}
 		if (state.phase === "EXECUTING") {
+			if (state.track === "FAST") {
+				const touched = state.modifiedFiles?.length ?? 0;
+				return {
+					message: {
+						customType: "ag-exec-context",
+						content: `[CONTEXT OPTIMIZER FAST TRACK: EXECUTING]
+You are running in Fast Track (direct Execute → Walkthrough without plan review).
+- Make edits directly using edit/write tools.
+- Verification gate will run when you call write_walkthrough.
+- Limit: max ${FAST_TRACK_MAX_FILES} modified files (${touched} touched so far). Touching protected files or >${FAST_TRACK_MAX_FILES} files will trigger escalation to REVIEW_PENDING.
+When finished, call write_walkthrough.`,
+						display: false,
+					},
+				};
+			}
 			const statusStr = dispatcher
 				? `${dispatcher.getStatus().done}/${dispatcher.getStatus().total} steps done (${dispatcher.getStatus().inFlight} running, ${dispatcher.getStatus().queued} queued)`
 				: `${tasks.filter((t) => t.status === "done").length}/${tasks.length} tasks done`;
@@ -519,8 +849,8 @@ When all tasks are complete, write_walkthrough to finish.`,
 			return {
 				message: {
 					customType: "ag-ready",
-					content: "[CONTEXT OPTIMIZER] pi-context-optimizer is loaded. Use /plan to start a structured " +
-						"plan\u2192review\u2192execute\u2192walkthrough workflow, or just start coding normally.",
+					content: "[CONTEXT OPTIMIZER] pi-context-optimizer is loaded. Use /fast for quick Execute\u2192Walkthrough, " +
+						"/plan for structured plan\u2192review\u2192execute, or just start coding normally.",
 					display: false,
 				},
 			};
@@ -532,7 +862,7 @@ When all tasks are complete, write_walkthrough to finish.`,
 	// Drop our stale context messages when we're inert (mirrors plan-mode filter)
 	pi.on("context", async (event) => {
 		if (state.phase !== "INERT") return;
-		const ours = new Set(["ag-plan-context", "ag-review-context", "ag-exec-context", "ag-approved", "ag-rejected"]);
+		const ours = new Set(["ag-plan-context", "ag-review-context", "ag-exec-context", "ag-approved", "ag-rejected", "ag-fast-started", "ag-escalated"]);
 		return {
 			messages: event.messages.filter((m) => {
 				const msg = m as AgentMessage & { customType?: string };
@@ -571,6 +901,10 @@ When all tasks are complete, write_walkthrough to finish.`,
 			? (dispatcher.getStatus().done + dispatcher.getStatus().failed) === dispatcher.getStatus().total
 			: (tasks.length > 0 && tasks.every((t) => t.status === "done" || t.status === "failed"));
 
+		// Guard: if the onAllDone callback from the Dispatcher already sent
+		// the completion message, skip re-sending it here to avoid duplicates.
+		if (_completionNotified) return;
+
 		if (state.phase === "EXECUTING" && isCompleted) {
 			const hasFailed = dispatcher ? dispatcher.getStatus().failed > 0 : tasks.some((t) => t.status === "failed");
 			pi.sendMessage(
@@ -599,15 +933,44 @@ When all tasks are complete, write_walkthrough to finish.`,
 			.pop() as { data?: ReturnType<typeof toPersisted> } | undefined;
 		if (last?.data) restored = fromPersisted(last.data);
 
+		const reviewFlag = pi.getFlag("ag-review") as ReviewMode | undefined;
+		const defaultReviewMode: ReviewMode = reviewFlag === "always" || reviewFlag === "never" ? reviewFlag : "auto";
+
 		if (restored && restored.artifactDir) {
-			state = restored;
+			state = { ...restored, reviewMode: restored.reviewMode ?? defaultReviewMode };
+		} else if (pi.getFlag("ag-fast") === true) {
+			const agDir = artifactDirFor(ctx.cwd, event.previousSessionFile ?? null);
+			state = {
+				phase: "EXECUTING",
+				artifactDir: agDir,
+				interview: false,
+				dispatcherActive: false,
+				track: "FAST",
+				reviewMode: defaultReviewMode,
+				modifiedFiles: [],
+			};
 		} else if (pi.getFlag("ag-plan") === true) {
-			state = { phase: "RESEARCHING", artifactDir: artifactDirFor(ctx.cwd, event.previousSessionFile ?? null), interview: false };
+			state = {
+				phase: "RESEARCHING",
+				artifactDir: artifactDirFor(ctx.cwd, event.previousSessionFile ?? null),
+				interview: false,
+				track: "STANDARD",
+				reviewMode: defaultReviewMode,
+				modifiedFiles: [],
+			};
 		} else if (pi.getFlag("ag-exec") === true) {
 			const agDir = artifactDirFor(ctx.cwd, event.previousSessionFile ?? null);
-			state = { phase: "EXECUTING", artifactDir: agDir, interview: false, dispatcherActive: true };
+			state = {
+				phase: "EXECUTING",
+				artifactDir: agDir,
+				interview: false,
+				dispatcherActive: true,
+				track: "STANDARD",
+				reviewMode: defaultReviewMode,
+				modifiedFiles: [],
+			};
 		} else {
-			state = defaultState();
+			state = { ...defaultState(), reviewMode: defaultReviewMode };
 		}
 
 		if (state.phase === "RESEARCHING" || state.phase === "PLAN_DRAFTING" || state.phase === "REVIEW_PENDING") {
@@ -626,7 +989,30 @@ When all tasks are complete, write_walkthrough to finish.`,
 				
 				if (state.dispatcherActive) {
 					const planMarkdown = await readFile(join(dir, PLAN_FILE), "utf8");
-					dispatcher = new Dispatcher(pi, ctx, planMarkdown, dir);
+					_completionNotified = false;
+					dispatcher = new Dispatcher(pi, ctx, planMarkdown, dir, undefined, undefined, undefined, undefined, (status) => {
+						if (_completionNotified) return;
+						_completionNotified = true;
+						if (status.failed > 0) {
+							pi.sendMessage(
+								{
+									customType: "ag-complete",
+									content: "Plan execution completed but some steps FAILED. Please review the failed tasks and call write_walkthrough to wrap up.",
+									display: true,
+								},
+								{ triggerTurn: true, deliverAs: "followUp" },
+							);
+						} else {
+							pi.sendMessage(
+								{
+									customType: "ag-complete",
+									content: "All plan steps complete. Call write_walkthrough to finish.",
+									display: true,
+								},
+								{ triggerTurn: true, deliverAs: "followUp" },
+							);
+						}
+					}, (done, total) => writeStatus({ done, total }));
 					await dispatcher.init();
 					void dispatcher.dispatchReady();
 				}
@@ -670,5 +1056,6 @@ When all tasks are complete, write_walkthrough to finish.`,
 	pi.on("session_shutdown", async () => {
 		watcher?.stop();
 		watcher = null;
+		dispatcher?.stop();
 	});
 }

@@ -15,28 +15,27 @@
 
 ## ✨ What is it?
 
-**pi-context-optimizer** brings a structured **human-in-the-loop** workflow to the `pi` coding agent. Instead of letting the agent code freely from the start, this extension enforces a disciplined five-phase cycle to optimize context, prevent runaway file writes, and align on goals before execution:
+**pi-context-optimizer** brings an **adaptive, risk-routed workflow** to the `pi` coding agent. Rather than enforcing a rigid review gate for every small change, it dynamically routes tasks across three specialized execution tracks:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      5-PHASE LOOP                          │
-│                                                             │
-│   INERT ──/plan──▶ RESEARCHING ──write_plan──▶ PLAN_DRAFTING │
-│                                                   │         │
-│                                                   ▼         │
-│   EXECUTING ◀───/approve─────────────── REVIEW_PENDING      │
-│       │                                                     │
-│       └── all done ──write_walkthrough──▶ INERT              │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       ADAPTIVE WORKFLOW TRACKS                              │
+│                                                                             │
+│  ⚡ FAST TRACK (Simple tasks, ≤2 files, no config/deps):                    │
+│     INERT ──/fast──▶ EXECUTING ──invariants check──▶ write_walkthrough     │
+│                                                                             │
+│  🔄 STANDARD TRACK (Multi-step features & refactors):                        │
+│     INERT ──/plan──▶ RESEARCHING ──write_plan──▶ AUTO-APPROVE ──▶ DAG EXEC  │
+│                                                                             │
+│  🛡️ GATED TRACK (High-risk, database migrations, CI, protected files):       │
+│     INERT ──/plan──▶ RESEARCHING ──write_plan──▶ REVIEW_PENDING ──/approve │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-During **RESEARCHING** / **PLAN_DRAFTING** / **REVIEW_PENDING**, the agent is **blocked** from editing code — it can only read, explore, and reason. Once a plan is written and **you approve it**, the gates open and the agent executes step-by-step, reporting progress after each step.
-
-Perfect for:
-- 🎯 **Complex, multi-step refactors** where you want a plan before any code changes
-- 🧪 **Code reviews with an AI** — see the plan, approve or reject, then watch it execute
-- 📚 **Knowledge capture** — the walkthrough artifact persists what changed and why
-- 🤝 **Collaborative sessions** — `/grill` mode to interview the agent before it drafts
+- **⚡ Fast Track (`Execute → Walkthrough`)**: For typos, single-file bugfixes, local tests, and small patches. Bypasses `plan.md` and manual review completely. Enters execution immediately, verifies with deterministic project gates (`tsc`, `pytest`, `go test`), and writes an auditable `walkthrough.md`.
+- **🔄 Standard Track (`Plan → Auto-Approve → Execute → Walkthrough`)**: Drafts `plan.md` and displays it in VS Code, auto-approves execution without blocking the user, and runs concurrent DAG subagents.
+- **🛡️ Gated Track (`Plan → Review → Execute → Walkthrough`)**: Enforces a strict blocking lock awaiting `/approve` for sensitive tasks (dependencies, migrations, CI workflows, or destructive operations).
+- **🚨 Mid-Run Escalation**: If a Fast Track execution touches protected files, exceeds the 2-file blast radius, or fails invariant gates, mutations freeze instantly and escalate to `REVIEW_PENDING`.
 
 ---
 
@@ -47,7 +46,7 @@ To use `pi-context-optimizer`, ensure you have the following:
 1. **Node.js**: `node >= 18`
 2. **Pi Coding Agent**: `pi >= 0.78.0` installed globally or locally.
 3. **Sub-agent Infrastructure**:
-   - **`kmmuntasir/pi-nested-subagents:src`** (or configured sub-agent tools on the agent system) for executing nested agent sessions.
+   - **`nicobailon/pi-subagents`** (`pi-subagents` package on npm: https://github.com/nicobailon/pi-subagents) for executing child agent sessions.
    - **`tsedr-runtime`** (`T-SEDR`) configured globally or locally to hook into agent sessions.
 4. **VS Code Extension** (Optional): **`tufaan42.pi-context-optimizer`** for human-in-the-loop plan reviews and approval controls directly in the IDE.
 5. **Peer Dependencies**:
@@ -109,20 +108,30 @@ Launch `pi` in your workspace. You should see an initialization message confirmi
 
 The extension registers the following commands to control the workflow:
 
-| Command | Phase | Description |
-|---------|-------|-------------|
-| `/plan` | `INERT` → `RESEARCHING` | Enter read-only research mode to draft a plan. |
+| Command | Phase / Track | Description |
+|---------|---------------|-------------|
+| `/fast` | `INERT` → `EXECUTING` (Fast) | Enter Fast Track: direct execution without plan review (Execute → Walkthrough). |
+| `/plan` | `INERT` → `RESEARCHING` (Gated) | Enter read-only research mode to draft a plan with human review. |
 | `/grill` | `RESEARCHING` / `PLAN_DRAFTING` | Open an interactive grill/interview session to align details. |
 | `/done` | `PLAN_DRAFTING` | Exit grill mode and indicate readiness to finalize the plan. |
-| `/approve` | `REVIEW_PENDING` → `EXECUTING` | Approve the plan, opening write permissions. |
+| `/approve` | `REVIEW_PENDING` → `EXECUTING` | Approve the pending plan, opening write permissions. |
 | `/reject` | `REVIEW_PENDING` → `PLAN_DRAFTING` | Reject the plan and provide feedback for a revision. |
+| `/status` | Any | Show current phase, track, review mode, and progress. |
+| `/reset` | Any → `INERT` | Clean all session artifacts and reset to inert state. |
 
-### CLI Flag
+### CLI Flags
 
-You can also start a session auto-booted in planning mode:
+You can customize the initial track and review mode when starting `pi`:
 
 ```bash
+# Start in Fast Track mode for quick localized tasks
+pi --ag-fast "Fix typo in README.md"
+
+# Start in planning mode with structured review
 pi --ag-plan "Refactor the database layer to use Drizzle ORM"
+
+# Configure review gating policy: 'auto' (default), 'always' (strict), or 'never' (autonomous)
+pi --ag-review=auto
 ```
 
 ---
@@ -178,7 +187,7 @@ When a plan is approved, the engine compiles the steps into a Directed Acyclic G
 
 ### Framework & Registry Integration
 `pi-context-optimizer` is designed to run in environments utilizing:
-- **kmmuntasir/pi-nested-subagents**: The core execution engine relies on the nested sub-agent spawning API (`Agent` tool) exposed by the `kmmuntasir/pi-nested-subagents:src` package to spawn child tasks.
+- **nicobailon/pi-subagents**: The core execution engine relies on the Structured Delegation API and sub-agent runner exposed by the `pi-subagents` package (https://github.com/nicobailon/pi-subagents) to spawn child tasks.
 - **T-SEDR (`tsedr-runtime`)**: Fully integrates with `tsedr-runtime`. When a sub-agent session starts, T-SEDR's global `before_agent_start` hook executes within the sub-agent session to provide runtime validation and environment setup.
 
 ---

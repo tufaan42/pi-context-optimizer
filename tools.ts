@@ -21,6 +21,7 @@
  * Tools throw to signal errors (returning a value never sets isError=true).
  */
 
+import { execSync } from "node:child_process";
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";
@@ -34,6 +35,7 @@ import {
 	KNOWLEDGE_DIR,
 	renderTasksMd,
 	type TaskItem,
+	detectInvariantsGate,
 } from "./utils.ts";
 import { openArtifactInVSCode, pushPlanStatusToVSCode } from "./open.ts";
 import type { AgState } from "./state.ts";
@@ -43,9 +45,9 @@ export interface ToolDeps {
 	getState: () => AgState;
 	setState: (next: AgState) => void;
 	/** Called after write_plan to refresh the status.json file + watcher. */
-	onPlanSubmitted: () => Promise<void>;
-	/** Called after update_tasks to reflect counts into status.json. */
-	onTasksUpdated: (done: number, total: number) => Promise<void>;
+	onPlanSubmitted: (risk?: "low" | "medium" | "high") => Promise<void>;
+	/** Called after update_tasks to reflect counts into status.json and the live task state. */
+	onTasksUpdated: (done: number, total: number, items?: TaskItem[]) => Promise<void>;
 	/** Called after write_walkthrough to reset status. */
 	onWalkthroughWritten: () => Promise<void>;
 	/** Get active dispatcher status if running. */
@@ -74,20 +76,26 @@ function registerWritePlan(pi: ExtensionAPI, deps: ToolDeps): void {
 		label: "Write Plan",
 		description:
 			"Write the implementation plan to the plan.md artifact for this session. " +
-			"Use this ONLY during the research/plan phase. The plan will be opened in VS Code for " +
-			"human review; you MUST then STOP and wait — do not edit any code until the user " +
-			"approves (the gate blocks edit/write/bash-mutation). Do NOT call write_plan again " +
-			"after approval.",
+			"Use this during the research/plan phase. The plan will be opened in VS Code for " +
+			"human review. For standard tasks, it will auto-approve; for high-risk tasks, wait for /approve.",
 		promptSnippet: "Write the human-reviewable implementation plan to disk",
 		promptGuidelines: [
 			"Use write_plan to publish the implementation plan as a reviewable file. " +
-				"After write_plan returns, stop and wait for human approval before editing code.",
+				"If the task touches sensitive configurations or migrations, set risk_assessment to 'high'.",
 			"Design the plan with numbered tasks. If a task depends on other tasks, explicitly " +
 				"annotate it in the step text using the format: `Step N (depends: X, Y): task description`. " +
 				"This allows the task scheduler to run independent tasks in parallel.",
+			"You can also specify the dedicated subagent role for each step: `Step N (agent: worker, depends: X)` " +
+				"or `Step N (agent: reviewer)`. Supported agents from pi-subagents: worker (implementation), " +
+				"reviewer (code review/tests), scout (codebase recon), oracle (architecture advisory).",
 		],
 		parameters: Type.Object({
 			content: Type.String({ description: "Full markdown body of the plan." }),
+			risk_assessment: Type.Optional(
+				StringEnum(["low", "medium", "high"] as const, {
+					description: "Risk assessment level of this plan. 'high' forces mandatory human approval.",
+				}),
+			),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const s = deps.getState();
@@ -106,13 +114,13 @@ function registerWritePlan(pi: ExtensionAPI, deps: ToolDeps): void {
 			void openArtifactInVSCode(pi, planPath, true);
 
 			// Transition → REVIEW_PENDING; persist; refresh status.json + watcher.
-			deps.setState({ ...s, phase: "REVIEW_PENDING" });
-			await deps.onPlanSubmitted();
-			ctx.ui.notify("Plan submitted for review. Open plan.md in VS Code; /approve to begin.", "info");
+			const track = params.risk_assessment === "high" ? "GATED" : s.track ?? "STANDARD";
+			deps.setState({ ...s, phase: "REVIEW_PENDING", track });
+			await deps.onPlanSubmitted(params.risk_assessment);
+			ctx.ui.notify("Plan submitted. Open plan.md in VS Code to review.", "info");
 			return ok(
-				`Plan written to ${planPath} and opened in VS Code.\n` +
-					"Awaiting human review. STOP now — do not edit code. Wait for /approve.",
-				{ planPath },
+				`Plan written to ${planPath} and opened in VS Code.`,
+				{ planPath, track },
 			);
 		},
 	});
@@ -140,7 +148,7 @@ function registerUpdateTasks(pi: ExtensionAPI, deps: ToolDeps): void {
 				Type.Object({
 					step: Type.Integer({ description: "1-based step number." }),
 					text: Type.String({ description: "Short step description." }),
-					status: StringEnum(["pending", "in_progress", "done"] as const),
+					status: StringEnum(["pending", "in_progress", "done", "failed"] as const),
 				}),
 			),
 		}),
@@ -160,7 +168,7 @@ function registerUpdateTasks(pi: ExtensionAPI, deps: ToolDeps): void {
 			void openArtifactInVSCode(pi, tasksPath, false);
 
 			const done = items.filter((t) => t.status === "done").length;
-			await deps.onTasksUpdated(done, items.length);
+			await deps.onTasksUpdated(done, items.length, items);
 			return ok(`tasks.md updated (${done}/${items.length} done).`, { done, total: items.length });
 		},
 	});
@@ -191,6 +199,23 @@ function registerWalkthrough(pi: ExtensionAPI, deps: ToolDeps): void {
 				throw new Error(`write_walkthrough is only valid during EXECUTING (current: ${s.phase}).`);
 			}
 			if (!s.artifactDir) throw new Error("No artifact directory for this session.");
+
+			// Invariant verification gate: if a project gate is detected (e.g. tsc, pytest, go test),
+			// run it before allowing the walkthrough to complete.
+			const cwd = ctx?.cwd ?? process.cwd();
+			const gateCmd = detectInvariantsGate(cwd);
+			if (gateCmd) {
+				try {
+					execSync(gateCmd, { cwd, stdio: "pipe", timeout: 30000 });
+				} catch (err: any) {
+					const stdout = err.stdout ? String(err.stdout) : "";
+					const stderr = err.stderr ? String(err.stderr) : "";
+					throw new Error(
+						`Verification gate failed (${gateCmd}):\n${stderr || stdout || err.message}\n` +
+						"Fix compilation or test failures before completing write_walkthrough.",
+					);
+				}
+			}
 
 			const wtPath = join(s.artifactDir, WALKTHROUGH_FILE);
 			await withFileMutationQueue(wtPath, async () => {
